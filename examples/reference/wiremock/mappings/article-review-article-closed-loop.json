@@ -1,0 +1,86 @@
+{
+  "scenarioName": "ArticleLifecycle",
+  "requiredScenarioState": "ArticleSubmittedWithAssignment",
+  "newScenarioState": "TaskAssignmentFired",
+  "request": {
+    "method": "POST",
+    "urlPath": "/graphql",
+    "bodyPatterns": [
+      {
+        "contains": "articleReview_article"
+      }
+    ]
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "data": {
+        "articleReview_article": {
+          "__typename": "ArticleReview_Article",
+          "title": "Closed-Loop Integration Test Article",
+          "abstract": "An article that triggers a task assignment through the closed loop.",
+          "submissionDate": "2026-03-10T14:00:00Z",
+          "articleType": {
+            "__typename": "ArticleReview_ArticleType",
+            "id": 2,
+            "name": "Review Article",
+            "maxReviewers": 2,
+            "noOfIndependentRpt": 1
+          },
+          "researchTopic": {
+            "__typename": "ResearchTopic_ResearchTopic",
+            "id": 200,
+            "title": "Machine Learning"
+          },
+          "journal": {
+            "__typename": "Taxonomy_Journal",
+            "id": 20,
+            "name": "Frontiers in Artificial Intelligence"
+          },
+          "section": {
+            "__typename": "Taxonomy_Section",
+            "id": 8,
+            "name": "Natural Language Processing",
+            "paths": [
+              {
+                "__typename": "Taxonomy_JournalSectionPath",
+                "journal": {
+                  "__typename": "Taxonomy_Journal",
+                  "id": 20,
+                  "name": "Frontiers in Artificial Intelligence"
+                }
+              }
+            ]
+          },
+          "authors": [
+            {
+              "__typename": "ArticleReview_ArticleAuthor",
+              "id": 2001,
+              "firstName": "John",
+              "middleName": null,
+              "lastName": "Smith",
+              "order": 1,
+              "isCorresponding": true
+            }
+          ]
+        }
+      }
+    }
+  },
+  "postServeActions": [
+    {
+      "name": "webhook",
+      "parameters": {
+        "method": "POST",
+        "url": "http://event-trigger:8080/publish",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyFile": "webhooks/task-assigned.json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+name: editorial-assignment-happy-path
+description: >
+  Publish an Article-Submitted legacy event, then assert what the application
+  did with it: the manuscript it holds, the inbox row it wrote, and the
+  Manuscript.Created event it emitted through its outbox.
+variables:
+  articleId: "515098"
+  spaceId: "space-main"
+  # The stub under wiremock/mappings answers with this title, and no other part
+  # of the environment holds it. An assertion on this value therefore proves the
+  # application read the simulated upstream and carried the answer through.
+  articleTitle: "Simulated Article for Integration Test"
+steps:
+  - name: set-wiremock-article-submitted
+    type: wiremock/set-state
+    scenarioName: ArticleLifecycle
+    state: ArticleSubmitted
+
+  - name: publish-article-submitted
+    type: event/publish
+    exchange: Journal.Article
+    routingKey: Journal.Article-Submitted.1.0.0
+    dataFile: article-submitted.v1.0.0.json
+    as: submitted
+
+  - name: await-manuscript-created
+    type: await
+    captured:
+      exchange: public.orchestration-engine.Manuscript.v1
+      eventType: Manuscript.Created
+    expect:
+      countAtLeast: 1
+    retry:
+      until: pass
+      timeout: 10s
+      interval: 500ms
+
+  # The design asks the scenario to assert application state, and
+  # decision D6 asks every assertion to read the application and never the mock.
+  # The manuscript row is that state.
+  - name: await-the-manuscript-in-the-app
+    type: await
+    target: app
+    graphql:
+      query: |
+        query Manuscript($articleId: String!) {
+          manuscriptByArticleId(articleId: $articleId) {
+            id
+            articleId
+            title
+            status
+          }
+        }
+      variables:
+        articleId: "{{ .articleId }}"
+    expect:
+      jsonPath: "$.data.manuscriptByArticleId.status"
+      equals: "Created"
+    retry:
+      until: pass
+      timeout: 10s
+      interval: 500ms
+
+assertions:
+  - name: the-manuscript-carries-the-simulated-title
+    type: app/graphql
+    target: app
+    graphql:
+      query: |
+        query Manuscript($articleId: String!) {
+          manuscriptByArticleId(articleId: $articleId) {
+            id
+            articleId
+            title
+            status
+          }
+        }
+      variables:
+        articleId: "{{ .articleId }}"
+    expect:
+      jsonPath: "$.data.manuscriptByArticleId.title"
+      equals: "{{ .articleTitle }}"
+
+  - name: the-outbound-event-carries-the-simulated-title
+    type: event/captured
+    captured:
+      exchange: public.orchestration-engine.Manuscript.v1
+      eventType: Manuscript.Created
+    expect:
+      jsonPath: "$[0].body.data.title"
+      equals: "{{ .articleTitle }}"
+
+  - name: the-outbound-event-names-the-article-it-came-from
+    type: event/captured
+    captured:
+      exchange: public.orchestration-engine.Manuscript.v1
+      eventType: Manuscript.Created
+    expect:
+      jsonPath: "$[0].body.data.articleId"
+      equals: "{{ .articleId }}"
+
+  # The event standard asks a consumer to record every delivery in an inbox table before it
+  # acknowledges. SDD section 8.4 reads that table through the target config.
+  - name: the-app-recorded-the-delivery-in-its-inbox
+    type: inbox/assert
+    target: app-db
+    where:
+      messageId: "{{ .submitted.id }}"
+    expect:
+      rows: 1
+      notNull: [processed_at]
+      columns:
+        retry_count: 0

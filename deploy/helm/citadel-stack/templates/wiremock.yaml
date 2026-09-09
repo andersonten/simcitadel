@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "wiremock") }}
+  labels:
+    {{- include "citadel-stack.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "citadel-stack.selectorLabels" (dict "root" . "component" "wiremock") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "citadel-stack.labels" . | nindent 8 }}
+        {{- include "citadel-stack.selectorLabels" (dict "root" . "component" "wiremock") | nindent 8 }}
+    spec:
+      {{- include "citadel-stack.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "citadel-stack.podSecurityContext" .Values.wiremock.podSecurityContext | nindent 8 }}
+      # No stub volume, and no ConfigMap of mappings. citadel loads the pack under
+      # paths.wiremock over the admin API in phase 5 of SDD section 4.2, so the
+      # same mechanism serves this chart and the compose stack. A ConfigMap would
+      # cap the whole pack at 1 MiB and would need a pod restart per stub change.
+      containers:
+        - name: wiremock
+          image: "{{ .Values.wiremock.image.repository }}:{{ .Values.wiremock.image.tag }}"
+          imagePullPolicy: {{ .Values.wiremock.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.wiremock.resources | nindent 12 }}
+          securityContext:
+            {{- include "citadel-stack.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            # The JVM writes to the temporary directory at runtime, and the
+            # read-only root filesystem makes /tmp unwritable without a volume.
+            - name: tmp
+              mountPath: /tmp
+            # citadel uploads the __files half of the pack with
+            # PUT /__admin/files/{name} in phase 5 of SDD section 4.2. WireMock
+            # keeps that blob store under its root directory, which belongs to
+            # root in the image and which the read-only root filesystem of SDD
+            # section 11.2 makes unwritable. Without this volume the upload
+            # answers 500 and every bodyFileName resolves to nothing.
+            - name: files
+              mountPath: /home/wiremock/__files
+          livenessProbe:
+            httpGet:
+              path: /__admin/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /__admin/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: files
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "wiremock") }}
+  labels:
+    {{- include "citadel-stack.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    {{- include "citadel-stack.selectorLabels" (dict "root" . "component" "wiremock") | nindent 4 }}

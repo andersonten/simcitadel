@@ -1,0 +1,72 @@
+{
+  "scenarioName": "ArticleLifecycle",
+  "requiredScenarioState": "ArticleSubmitted",
+  "request": {
+    "method": "POST",
+    "urlPath": "/graphql",
+    "bodyPatterns": [
+      {
+        "contains": "articleReview_article"
+      }
+    ]
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "data": {
+        "articleReview_article": {
+          "__typename": "ArticleReview_Article",
+          "title": "Simulated Article for Integration Test",
+          "abstract": "A simulated abstract for the happy-path scenario.",
+          "submissionDate": "2026-01-15T10:00:00Z",
+          "articleType": {
+            "__typename": "ArticleReview_ArticleType",
+            "id": 1,
+            "name": "Original Research",
+            "maxReviewers": 3,
+            "noOfIndependentRpt": 1
+          },
+          "researchTopic": {
+            "__typename": "ResearchTopic_ResearchTopic",
+            "id": 100,
+            "title": "Computational Biology"
+          },
+          "journal": {
+            "__typename": "Taxonomy_Journal",
+            "id": 10,
+            "name": "Frontiers in Computational Neuroscience"
+          },
+          "section": {
+            "__typename": "Taxonomy_Section",
+            "id": 5,
+            "name": "Computational Genomics",
+            "paths": [
+              {
+                "__typename": "Taxonomy_JournalSectionPath",
+                "journal": {
+                  "__typename": "Taxonomy_Journal",
+                  "id": 10,
+                  "name": "Frontiers in Computational Neuroscience"
+                }
+              }
+            ]
+          },
+          "authors": [
+            {
+              "__typename": "ArticleReview_ArticleAuthor",
+              "id": 1001,
+              "firstName": "Jane",
+              "middleName": null,
+              "lastName": "Doe",
+              "order": 1,
+              "isCorresponding": true
+            }
+          ]
+        }
+      }
+    }
+  }
+}

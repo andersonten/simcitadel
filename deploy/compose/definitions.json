@@ -1,0 +1,14 @@
+{
+  "rabbit_version": "4.3.4",
+  "exchanges": [
+    { "name": "citadel.unroutable.ae", "vhost": "/", "type": "fanout", "durable": true, "auto_delete": false, "internal": false, "arguments": {} }
+  ],
+  "queues": [
+    { "name": "citadel.unroutable", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {} },
+    { "name": "citadel.spy.public.orchestration-engine.Manuscript.v1", "vhost": "/", "durable": true, "auto_delete": false, "arguments": { "x-max-length": 1000, "x-overflow": "drop-head" } },
+    { "name": "citadel.spy.public.orchestration-engine.Task.v1", "vhost": "/", "durable": true, "auto_delete": false, "arguments": { "x-max-length": 1000, "x-overflow": "drop-head" } }
+  ],
+  "bindings": [
+    { "source": "citadel.unroutable.ae", "vhost": "/", "destination": "citadel.unroutable", "destination_type": "queue", "routing_key": "", "arguments": {} }
+  ]
+}

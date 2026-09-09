@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq-auth") }}
+  labels:
+    {{- include "citadel-stack.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  username: {{ .Values.rabbitmq.auth.username | quote }}
+  password: {{ .Values.rabbitmq.auth.password | quote }}
+  # Every client of the broker reads the whole URL from this key, so no
+  # manifest and no command line holds the password.
+  amqp-url: {{ printf "amqp://%s:%s@%s:5672/" .Values.rabbitmq.auth.username .Values.rabbitmq.auth.password (include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq")) | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq") }}
+  labels:
+    {{- include "citadel-stack.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "citadel-stack.selectorLabels" (dict "root" . "component" "rabbitmq") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "citadel-stack.labels" . | nindent 8 }}
+        {{- include "citadel-stack.selectorLabels" (dict "root" . "component" "rabbitmq") | nindent 8 }}
+    spec:
+      {{- include "citadel-stack.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "citadel-stack.podSecurityContext" .Values.rabbitmq.podSecurityContext | nindent 8 }}
+      containers:
+        - name: rabbitmq
+          image: "{{ .Values.rabbitmq.image.repository }}:{{ .Values.rabbitmq.image.tag }}"
+          imagePullPolicy: {{ .Values.rabbitmq.image.pullPolicy }}
+          env:
+            # The broker creates this user at first boot. The data directory is
+            # an emptyDir, so every start of the pod is a first boot.
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq-auth") }}
+                  key: username
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq-auth") }}
+                  key: password
+          ports:
+            - name: amqp
+              containerPort: 5672
+              protocol: TCP
+            - name: management
+              containerPort: 15672
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.rabbitmq.resources | nindent 12 }}
+          securityContext:
+            {{- include "citadel-stack.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            # The broker writes the node database and the Erlang cookie here.
+            - name: data
+              mountPath: /var/lib/rabbitmq
+            # The broker opens a log file at boot and fails on a read-only path.
+            - name: logs
+              mountPath: /var/log/rabbitmq
+          livenessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            # check_running waits for the broker to accept definitions, which
+            # check_port_connectivity alone does not guarantee.
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_running"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq") }}
+  labels:
+    {{- include "citadel-stack.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+      protocol: TCP
+    - name: management
+      port: 15672
+      targetPort: 15672
+      protocol: TCP
+  selector:
+    {{- include "citadel-stack.selectorLabels" (dict "root" . "component" "rabbitmq") | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq-definitions") }}
+  labels:
+    {{- include "citadel-stack.labels" . | nindent 4 }}
+data:
+  definitions.json: |
+    {
+      "exchanges": [
+        { "name": "citadel.unroutable.ae", "vhost": "/", "type": "fanout", "durable": true, "auto_delete": false, "internal": false, "arguments": {} }
+      ],
+      "queues": [
+        { "name": "citadel.unroutable", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {} }
+      ],
+      "bindings": [
+        { "source": "citadel.unroutable.ae", "vhost": "/", "destination": "citadel.unroutable", "destination_type": "queue", "routing_key": "", "arguments": {} }
+      ]
+    }

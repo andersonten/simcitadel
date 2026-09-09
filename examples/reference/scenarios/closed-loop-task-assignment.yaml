@@ -1,0 +1,137 @@
+name: closed-loop-task-assignment
+description: >
+  Demonstrate the closed-loop pattern. The app receives an Article-Submitted
+  event, queries the federated GraphQL gateway (WireMock), and WireMock fires a
+  postServeAction webhook to event-trigger, which publishes a Task-Assigned
+  event back to the broker. The app consumes that second event, updates the
+  manuscript status to Assigned, and writes a Manuscript.Assigned outbox row.
+  The loop terminates because the stub advances the WireMock scenario state and
+  matches at most once.
+variables:
+  articleId: "515200"
+  spaceId: "space-main"
+  articleTitle: "Closed-Loop Integration Test Article"
+steps:
+  - name: set-wiremock-closed-loop-state
+    type: wiremock/set-state
+    scenarioName: ArticleLifecycle
+    state: ArticleSubmittedWithAssignment
+
+  - name: publish-article-submitted
+    type: event/publish
+    exchange: Journal.Article
+    routingKey: Journal.Article-Submitted.1.0.0
+    dataFile: article-submitted.v1.0.0.json
+    as: submitted
+
+  - name: await-manuscript-created
+    type: await
+    captured:
+      exchange: public.orchestration-engine.Manuscript.v1
+      eventType: Manuscript.Created
+    expect:
+      countAtLeast: 1
+    retry:
+      until: pass
+      timeout: 10s
+      interval: 500ms
+
+  - name: await-manuscript-assigned
+    type: await
+    captured:
+      exchange: public.orchestration-engine.Manuscript.v1
+      eventType: Manuscript.Assigned
+    expect:
+      countAtLeast: 1
+    retry:
+      until: pass
+      timeout: 15s
+      interval: 500ms
+
+  - name: await-the-manuscript-status-in-the-app
+    type: await
+    target: app
+    graphql:
+      query: |
+        query Manuscript($articleId: String!) {
+          manuscriptByArticleId(articleId: $articleId) {
+            id
+            articleId
+            title
+            status
+          }
+        }
+      variables:
+        articleId: "{{ .articleId }}"
+    expect:
+      jsonPath: "$.data.manuscriptByArticleId.status"
+      equals: "Assigned"
+    retry:
+      until: pass
+      timeout: 15s
+      interval: 500ms
+
+assertions:
+  - name: the-manuscript-reached-assigned-status
+    type: app/graphql
+    target: app
+    graphql:
+      query: |
+        query Manuscript($articleId: String!) {
+          manuscriptByArticleId(articleId: $articleId) {
+            id
+            articleId
+            title
+            status
+          }
+        }
+      variables:
+        articleId: "{{ .articleId }}"
+    expect:
+      jsonPath: "$.data.manuscriptByArticleId.status"
+      equals: "Assigned"
+
+  - name: the-manuscript-carries-the-closed-loop-title
+    type: app/graphql
+    target: app
+    graphql:
+      query: |
+        query Manuscript($articleId: String!) {
+          manuscriptByArticleId(articleId: $articleId) {
+            title
+          }
+        }
+      variables:
+        articleId: "{{ .articleId }}"
+    expect:
+      jsonPath: "$.data.manuscriptByArticleId.title"
+      equals: "{{ .articleTitle }}"
+
+  - name: the-created-event-fired-before-the-assigned-event
+    type: event/captured
+    captured:
+      exchange: public.orchestration-engine.Manuscript.v1
+      eventType: Manuscript.Created
+    expect:
+      jsonPath: "$[0].body.data.articleId"
+      equals: "{{ .articleId }}"
+
+  - name: the-assigned-event-carries-the-article-id
+    type: event/captured
+    captured:
+      exchange: public.orchestration-engine.Manuscript.v1
+      eventType: Manuscript.Assigned
+    expect:
+      jsonPath: "$[0].body.data.articleId"
+      equals: "{{ .articleId }}"
+
+  - name: the-app-recorded-both-deliveries-in-its-inbox
+    type: inbox/assert
+    target: app-db
+    where:
+      messageId: "{{ .submitted.id }}"
+    expect:
+      rows: 1
+      notNull: [processed_at]
+      columns:
+        retry_count: 0

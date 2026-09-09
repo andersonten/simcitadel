@@ -1,0 +1,15 @@
+apiVersion: v2
+name: citadel-stack
+description: Citadel service simulation platform for isolated microservice development
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/andersonten/simcitadel
+sources:
+  - https://github.com/andersonten/simcitadel
+keywords:
+  - testing
+  - service-virtualization
+  - wiremock
+  - rabbitmq
+  - debezium

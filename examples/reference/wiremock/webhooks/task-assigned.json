@@ -1,0 +1,19 @@
+{
+  "delivery": "amqp",
+  "exchange": "Journal.Article",
+  "routingKey": "Journal.Article-Task-Assigned.1.0.0",
+  "event": {
+    "specversion": "1.0",
+    "type": "Task-Assigned",
+    "source": "TaskManagement",
+    "id": "{{randomValue type='UUID'}}",
+    "version": "v1.0.0",
+    "subject": "/articles/{{jsonPath originalRequest.body '$.variables.id'}}",
+    "time": "{{now}}",
+    "data": {
+      "articleId": {{jsonPath originalRequest.body '$.variables.id'}},
+      "spaceId": "space-main",
+      "assignee": "editor-42"
+    }
+  }
+}

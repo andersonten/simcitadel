@@ -1,0 +1,13 @@
+{
+  "specversion": "1.0",
+  "type": "Article-Submitted",
+  "source": "Journal",
+  "id": "{{ uuid }}",
+  "version": "v1.0.0",
+  "subject": "/articles/{{ .articleId }}",
+  "time": "{{ now }}",
+  "data": {
+    "articleId": {{ .articleId }},
+    "spaceId": "{{ .spaceId }}"
+  }
+}

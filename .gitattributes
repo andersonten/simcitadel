@@ -1,0 +1,9 @@
+*.sql text eol=lf
+*.sh text eol=lf
+# The compose file carries an inline shell script in the rabbitmq-init service,
+# so a CRLF checkout on Windows breaks startup the same way a bind-mounted
+# script would. SDD section 11.1 names this failure.
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf

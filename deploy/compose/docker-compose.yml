@@ -1,0 +1,362 @@
+# Every image is pinned by tag and by digest, per SDD section 11.1.
+# To refresh a digest, run deploy/compose/pin-images.sh.
+services:
+  rabbitmq:
+    image: rabbitmq:4.3.4-management@sha256:eb5295d083325da5929a5ade766684d4019ffd2bce8bc7e43d6f9a05cafc8646
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:-citadel}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:-citadel}"
+    healthcheck:
+      # check_running waits for the broker to accept definitions, which
+      # check_port_connectivity alone does not guarantee.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+
+  # Topology and the alternate-exchange policy load over the management API
+  # rather than the load_definitions boot argument. A boot-time import replaces
+  # the whole node state, so it would have to carry the user and a password
+  # hash, and the credentials would stop coming from the environment.
+  rabbitmq-init:
+    image: curlimages/curl:8.12.1@sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:-citadel}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:-citadel}"
+    volumes:
+      - ./definitions.json:/etc/rabbitmq/definitions.json:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        AUTH="$${RABBITMQ_DEFAULT_USER}:$${RABBITMQ_DEFAULT_PASS}"
+        API="http://rabbitmq:15672/api"
+        curl -sf -u "$$AUTH" --retry 10 --retry-all-errors --retry-delay 2 \
+          -X POST "$$API/definitions" \
+          -H 'Content-Type: application/json' \
+          --data-binary @/etc/rabbitmq/definitions.json
+        curl -sf -u "$$AUTH" --retry 10 --retry-all-errors --retry-delay 2 \
+          -X PUT "$$API/policies/%2F/citadel-alternate-exchange" \
+          -H 'Content-Type: application/json' \
+          -d '{"pattern":"^(public|private)\\.","apply-to":"exchanges","priority":0,"definition":{"alternate-exchange":"citadel.unroutable.ae"}}'
+        echo "rabbitmq topology and policy applied"
+
+  wiremock:
+    image: wiremock/wiremock:3.12.1@sha256:c3cf12f602139e3ffb4e042b246887ff6cadf3bcbb32625392d45f12e8f634d4
+    ports:
+      - "127.0.0.1:9090:8080"
+    # No stub mount. citadel loads the pack under paths.wiremock over the admin
+    # API at the start of every run, which is the one mechanism that works both
+    # here and in a cluster, where a mount needs a ConfigMap and a ConfigMap caps
+    # the pack at 1 MiB. The import is authoritative, so it would delete a mounted
+    # stub anyway and two mechanisms would fight over the same server.
+    #
+    # The consequence is deliberate: a stack that has never run a scenario serves
+    # no stub. Run citadel, or call the admin API by hand, before expecting one.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  app-db:
+    image: postgres:15@sha256:5f72c7b5bd616308ccfd2e74d6be16fb06364e5eecbb815fe9dc6ab9761d2111
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-citadel}"
+      POSTGRES_USER: "${POSTGRES_USER:-citadel}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-citadel}"
+    command: ["postgres", "-c", "wal_level=logical"]
+    volumes:
+      - app-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-citadel} -d ${POSTGRES_DB:-citadel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  event-trigger:
+    build:
+      context: ../..
+      dockerfile: cmd/event-trigger/Dockerfile
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      EVENT_TRIGGER_AMQP_URL: "${AMQP_URL:-amqp://${RABBITMQ_DEFAULT_USER:-citadel}:${RABBITMQ_DEFAULT_PASS:-citadel}@rabbitmq:5672/}"
+      EVENT_TRIGGER_PUBLISH_CONFIRM_TIMEOUT: "${PUBLISH_CONFIRM_TIMEOUT:-5s}"
+      EVENT_TRIGGER_PUBLISH_BUDGET: "${PUBLISH_BUDGET:-100}"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
+    # The image is FROM scratch and holds no shell, so the binary probes itself.
+    healthcheck:
+      test: ["CMD", "/event-trigger", "-health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  event-capture:
+    build:
+      context: ../..
+      dockerfile: cmd/event-capture/Dockerfile
+    ports:
+      - "127.0.0.1:8082:8080"
+    environment:
+      EVENT_CAPTURE_AMQP_URL: "${AMQP_URL:-amqp://${RABBITMQ_DEFAULT_USER:-citadel}:${RABBITMQ_DEFAULT_PASS:-citadel}@rabbitmq:5672/}"
+      # The default matches capture.exchanges in examples/reference and the
+      # spy queues in definitions.json. An empty value binds nothing, and preflight
+      # then fails the first run with exit 3, per SDD sections 7.1 and 11.1.
+      EVENT_CAPTURE_EXCHANGES: "${CAPTURE_EXCHANGES:-public.orchestration-engine.Manuscript.v1:own,public.orchestration-engine.Task.v1:own}"
+      EVENT_CAPTURE_BUFFER_SIZE: "${BUFFER_SIZE:-1000}"
+      EVENT_CAPTURE_BIND_TIMEOUT: "${BIND_TIMEOUT:-120s}"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
+    # The image is FROM scratch and holds no shell, so the binary probes itself.
+    healthcheck:
+      test: ["CMD", "/event-capture", "-health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # The application under test. SDD section 3.1 names it, and a consuming
+  # repository replaces this with its own image by setting APP_IMAGE. The default
+  # builds the example app of this repository, which consumes the inbound event,
+  # reads the upstream through WireMock, and writes an inbox row and an outbox row.
+  # It is the smallest thing that makes the whole pipeline real.
+  app:
+    image: "${APP_IMAGE:-}"
+    build:
+      context: ../..
+      dockerfile: cmd/example-app/Dockerfile
+    ports:
+      - "127.0.0.1:5000:8080"
+    environment:
+      # The override variable is deliberately not APP_DB_DSN. The example config
+      # resolves ${APP_DB_DSN} for the citadel process on the developer's machine,
+      # where the database is on a published port, and this service needs the
+      # service name on the compose network. One name cannot hold both values, and
+      # a shell that exports the host one would otherwise send this container to
+      # 127.0.0.1 and it would exit 1 with a refused connection. The broker
+      # variables above keep host and stack names apart for the same reason.
+      EXAMPLE_APP_DB_DSN: "${EXAMPLE_APP_DB_DSN:-postgres://${POSTGRES_USER:-citadel}:${POSTGRES_PASSWORD:-citadel}@app-db:5432/${POSTGRES_DB:-citadel}?sslmode=disable}"
+      EXAMPLE_APP_AMQP_URL: "${AMQP_URL:-amqp://${RABBITMQ_DEFAULT_USER:-citadel}:${RABBITMQ_DEFAULT_PASS:-citadel}@rabbitmq:5672/}"
+      # The app reads its upstream through WireMock. That is the point of the
+      # platform: a real HTTP call on the real code path, answered by a stub.
+      EXAMPLE_APP_UPSTREAM_GRAPHQL_URL: "${EXAMPLE_APP_UPSTREAM_GRAPHQL_URL:-http://wiremock:8080/graphql}"
+      # The inbound exchange and routing key match the reference scenario in
+      # examples/reference, which publishes Journal.Article-Submitted.1.0.0.
+      EXAMPLE_APP_INBOUND_EXCHANGE: "${EXAMPLE_APP_INBOUND_EXCHANGE:-Journal.Article}"
+      EXAMPLE_APP_INBOUND_ROUTING_KEY: "${EXAMPLE_APP_INBOUND_ROUTING_KEY:-Journal.Article-Submitted.#}"
+      # The closed-loop scenario fires a Task-Assigned event through WireMock's
+      # postServeAction. The app needs a binding for that routing key to receive it.
+      EXAMPLE_APP_INBOUND_ADDITIONAL_ROUTING_KEYS: "${EXAMPLE_APP_INBOUND_ADDITIONAL_ROUTING_KEYS:-Journal.Article-Task-Assigned.#}"
+      # The outbound value becomes outbox.aggregatetype, which SDD section 10.1
+      # makes the full exchange name, and the EventRouter routes on it.
+      EXAMPLE_APP_OUTBOUND_EXCHANGE: "${EXAMPLE_APP_OUTBOUND_EXCHANGE:-public.orchestration-engine.Manuscript.v1}"
+    depends_on:
+      app-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
+      wiremock:
+        condition: service_healthy
+    # The image is FROM scratch and holds no shell, so the binary probes itself.
+    # The app answers 503 until the schema exists and the consumer runs, which is
+    # the condition Debezium below waits on.
+    healthcheck:
+      test: ["CMD", "/example-app", "-health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  debezium:
+    image: quay.io/debezium/server:3.2.0.Final@sha256:197f5eaf72b8bfcad1f0a8cca6c663fa1acecde72aa287b7617cef912a218e18
+    ports:
+      - "127.0.0.1:8083:8080"
+    environment:
+      DEBEZIUM_SOURCE_CONNECTOR_CLASS: "io.debezium.connector.postgresql.PostgresConnector"
+      DEBEZIUM_SOURCE_DATABASE_HOSTNAME: "app-db"
+      DEBEZIUM_SOURCE_DATABASE_PORT: "5432"
+      DEBEZIUM_SOURCE_DATABASE_USER: "${POSTGRES_USER:-citadel}"
+      DEBEZIUM_SOURCE_DATABASE_PASSWORD: "${POSTGRES_PASSWORD:-citadel}"
+      DEBEZIUM_SOURCE_DATABASE_DBNAME: "${POSTGRES_DB:-citadel}"
+      # The local Postgres holds no certificate, so the SDD section 10.1 deviation
+      # table names disable in place of the production value require.
+      DEBEZIUM_SOURCE_DATABASE_SSLMODE: "disable"
+      DEBEZIUM_SOURCE_PLUGIN_NAME: "pgoutput"
+      DEBEZIUM_SOURCE_SLOT_NAME: "pe_outbox_slot"
+      DEBEZIUM_SOURCE_SLOT_DROP_ON_STOP: "true"
+      DEBEZIUM_SOURCE_PUBLICATION_AUTOCREATE_MODE: "filtered"
+      DEBEZIUM_SOURCE_SCHEMA_INCLUDE_LIST: "public"
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: "public.outbox"
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: "orchestration-engine"
+      DEBEZIUM_SOURCE_SNAPSHOT_MODE: "when_needed"
+      DEBEZIUM_SOURCE_HEARTBEAT_INTERVAL_MS: "0"
+      DEBEZIUM_SOURCE_OFFSET_STORAGE: "org.apache.kafka.connect.storage.MemoryOffsetBackingStore"
+      DEBEZIUM_SOURCE_OFFSET_FLUSH_INTERVAL_MS: "0"
+      DEBEZIUM_TRANSFORMS: "outbox"
+      DEBEZIUM_TRANSFORMS_OUTBOX_TYPE: "io.debezium.transforms.outbox.EventRouter"
+      DEBEZIUM_TRANSFORMS_OUTBOX_TABLE_FIELDS_TIMESTAMP: "created_at"
+      DEBEZIUM_TRANSFORMS_OUTBOX_TABLE_EXPAND_JSON_PAYLOAD: "true"
+      DEBEZIUM_TRANSFORMS_OUTBOX_ROUTE_TOPIC_REGEX: "^(public|private)\\.orchestration-engine\\.([^.]+\\.[^.]+)(?:\\.(.*))?$$"
+      DEBEZIUM_TRANSFORMS_OUTBOX_ROUTE_TOPIC_REPLACEMENT: "$$1.orchestration-engine.$$2"
+      DEBEZIUM_TRANSFORMS_OUTBOX_TABLE_FIELDS_ADDITIONAL_PLACEMENT: "type:header:eventType,aggregatetype:header:aggregateType,aggregateid:header:aggregateId"
+      DEBEZIUM_SINK_TYPE: "rabbitmq"
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_HOST: "rabbitmq"
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_PORT: "5672"
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_USERNAME: "${RABBITMQ_DEFAULT_USER:-citadel}"
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_PASSWORD: "${RABBITMQ_DEFAULT_PASS:-citadel}"
+      DEBEZIUM_SINK_RABBITMQ_AUTOCREATEROUTINGKEY: "true"
+      DEBEZIUM_SINK_RABBITMQ_ROUTINGKEY_SOURCE: "topic"
+      DEBEZIUM_FORMAT_KEY: "json"
+      DEBEZIUM_FORMAT_KEY_SCHEMAS_ENABLE: "false"
+      DEBEZIUM_FORMAT_VALUE: "json"
+      DEBEZIUM_FORMAT_VALUE_SCHEMAS_ENABLE: "false"
+      DEBEZIUM_FORMAT_HEADER: "json"
+      DEBEZIUM_FORMAT_HEADER_SCHEMAS_ENABLE: "false"
+    # Debezium sinks to RabbitMQ, so the broker must be healthy before it starts.
+    #
+    # It also waits for the app, and that condition is not a preference. Debezium
+    # resolves table.include.list against the live catalog when it starts, and with
+    # publication.autocreate.mode=filtered it finds no match, refuses to create the
+    # publication and exits 1 rather than wait. The app creates public.outbox before
+    # it reports healthy, so this ordering is what lets Debezium run in the default
+    # profile at all.
+    depends_on:
+      app-db:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/q/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  cdc-postgres:
+    image: postgres:15@sha256:5f72c7b5bd616308ccfd2e74d6be16fb06364e5eecbb815fe9dc6ab9761d2111
+    profiles: ["cdc-postgres"]
+    ports:
+      - "127.0.0.1:5433:5432"
+    environment:
+      POSTGRES_DB: "${CDC_POSTGRES_DB:-upstream}"
+      POSTGRES_USER: "${CDC_POSTGRES_USER:-citadel}"
+      POSTGRES_PASSWORD: "${CDC_POSTGRES_PASSWORD:-citadel}"
+    command: ["postgres", "-c", "wal_level=logical"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CDC_POSTGRES_USER:-citadel} -d ${CDC_POSTGRES_DB:-upstream}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  cdc-sqlserver:
+    image: mcr.microsoft.com/mssql/server:2025-CU1-ubuntu-24.04@sha256:698682bab57c02c42bc0aa274b158aeb242d8e9104149a7489628d5535805816
+    profiles: ["cdc-sqlserver"]
+    ports:
+      - "127.0.0.1:1433:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${CDC_SQLSERVER_SA_PASSWORD:-Citadel!Passw0rd}"
+      # The Agent is off by default in this image, and the CDC capture job is an
+      # Agent job. Without the Agent no change reaches a change table.
+      MSSQL_AGENT_ENABLED: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # The shadow database, change data capture and the reduced capture-job poll
+  # interval of SDD section 10.2 apply here rather than in a manual step. The
+  # image already holds sqlcmd, so this init service adds no new image pin.
+  cdc-sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2025-CU1-ubuntu-24.04@sha256:698682bab57c02c42bc0aa274b158aeb242d8e9104149a7489628d5535805816
+    profiles: ["cdc-sqlserver"]
+    depends_on:
+      cdc-sqlserver:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      MSSQL_SA_PASSWORD: "${CDC_SQLSERVER_SA_PASSWORD:-Citadel!Passw0rd}"
+      CDC_SQLSERVER_DB: "${CDC_SQLSERVER_DB:-upstream}"
+      CDC_SQLSERVER_POLL_INTERVAL: "${CDC_SQLSERVER_POLL_INTERVAL:-1}"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -eu
+        sql() { /opt/mssql-tools18/bin/sqlcmd -S cdc-sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -b "$$@"; }
+        DB="$$CDC_SQLSERVER_DB"
+        POLL="$$CDC_SQLSERVER_POLL_INTERVAL"
+
+        sql -Q "IF DB_ID(N'$$DB') IS NULL CREATE DATABASE [$$DB];"
+
+        sql -d "$$DB" -Q "
+          IF (SELECT is_cdc_enabled FROM sys.databases WHERE name = DB_NAME()) = 0
+              EXEC sys.sp_cdc_enable_db;"
+
+        # sys.sp_cdc_add_job creates the capture job stopped, so the poll
+        # interval changes before the first log scan cycle. The guard reads
+        # msdb.dbo.sysjobs, because sys.sp_cdc_add_job creates msdb.dbo.cdc_jobs
+        # and a batch that names a missing table fails to compile.
+        sql -d "$$DB" -Q "
+          DECLARE @job sysname = N'cdc.' + DB_NAME() + N'_capture';
+          IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = @job)
+              EXEC sys.sp_cdc_add_job @job_type = N'capture', @start_job = 0;"
+
+        # The Agent refuses a stop for a job that does not run, and that refusal
+        # proves the job is stopped. The loop polls the Agent for that state.
+        stopped=0
+        for _ in $$(seq 1 30); do
+          out=$$(sql -d "$$DB" -Q "EXEC sys.sp_cdc_stop_job @job_type = N'capture';" 2>&1) || true
+          case "$$out" in
+            *"not currently running"*) stopped=1; break ;;
+          esac
+          sleep 1
+        done
+        if [ "$$stopped" -ne 1 ]; then
+          echo "capture job did not stop: $$out" >&2
+          exit 1
+        fi
+
+        # The capture job reads its poll interval at start, so the change is
+        # inert without the stop above and the start below.
+        sql -d "$$DB" -Q "EXEC sys.sp_cdc_change_job @job_type = N'capture', @continuous = 1, @pollinginterval = $$POLL;"
+        sql -d "$$DB" -Q "EXEC sys.sp_cdc_start_job @job_type = N'capture';"
+
+        sql -d "$$DB" -Q "
+          SET NOCOUNT ON;
+          IF (SELECT pollinginterval FROM msdb.dbo.cdc_jobs
+               WHERE database_id = DB_ID() AND job_type = N'capture') <> $$POLL
+              RAISERROR('capture job poll interval is not the configured value', 16, 1);"
+        echo "sqlserver cdc capture job runs with poll interval $${POLL}s"
+
+volumes:
+  app-db-data:

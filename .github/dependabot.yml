@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The compose images are pinned by digest, so an update here is a real change
+  # to the stack and needs the same review as code.
+  - package-ecosystem: docker
+    directory: /deploy/compose
+    schedule:
+      interval: weekly

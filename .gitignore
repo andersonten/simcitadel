@@ -1,0 +1,26 @@
+# Environment variable file with real credentials. Commit .env.example instead.
+.env
+
+# The citadel binary that make citadel writes to the repository root. The
+# leading slash is essential: a bare "citadel" also matches the cmd/citadel
+# directory, which hides every new file in that package from git add.
+/citadel
+
+# Build artifacts from go build inside cmd/ directories.
+cmd/event-trigger/event-trigger
+cmd/event-capture/event-capture
+cmd/example-app/example-app
+
+# GoReleaser output.
+/dist/
+
+# The diagnostic bundle of every run, one directory per run id. These hold
+# captured message bodies.
+.citadel/
+
+# Local notes that are not part of the project.
+/PROGRESS.md
+/docs/GAPS.md
+/AGENTS.md
+/docs/rfc.md
+/.cursor/

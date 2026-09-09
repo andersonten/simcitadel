@@ -1,0 +1,150 @@
+global:
+  imagePullSecrets:
+    - name: citadel-registry
+
+owner: ""
+
+wiremock:
+  image:
+    repository: wiremock/wiremock
+    tag: "3.12.1"
+    pullPolicy: IfNotPresent
+  # The image declares no USER and starts as root, so runAsNonRoot rejects it.
+  # The chart pins a non-root uid instead. WireMock writes nothing to disk.
+  podSecurityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+rabbitmq:
+  image:
+    repository: rabbitmq
+    tag: "4.3.4-management"
+    pullPolicy: IfNotPresent
+  # The broker reads these two values at first boot and creates the user.
+  # Keep both values URL safe, because the AMQP URL holds them without escape.
+  # These are placeholder values for an isolated environment. Override them
+  # with --set for a shared cluster.
+  auth:
+    username: citadel
+    password: citadel
+  # The image declares no USER. The rabbitmq account in the image is 999:999.
+  podSecurityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# The hook Job of SDD 7.4 imports the Citadel topology and applies the
+# alternate-exchange policy through the management API.
+aePolicy:
+  image:
+    repository: curlimages/curl
+    tag: "8.12.1"
+    pullPolicy: IfNotPresent
+  # The image declares the account name curl_user, and Kubernetes cannot map a
+  # name to a uid. The chart gives the numeric uid and gid of that account.
+  podSecurityContext:
+    runAsUser: 101
+    runAsGroup: 102
+    fsGroup: 102
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+eventTrigger:
+  image:
+    repository: ghcr.io/andersonten/event-trigger
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  # The image is FROM scratch and declares no USER. The binary reads no file,
+  # so any non-root uid works.
+  podSecurityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  # The publish budget of SDD section 7.6, per run ID. It bounds a WireMock
+  # closed loop, so a scenario that drives more publishes needs a higher value.
+  # The default matches deploy/compose/docker-compose.yml.
+  publishBudget: 100
+  # The publisher confirm window of SDD section 7.5. The trigger answers 502
+  # when the broker does not confirm inside it.
+  publishConfirmTimeout: 5s
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+eventCapture:
+  image:
+    repository: ghcr.io/andersonten/event-capture
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  # The image is FROM scratch and declares no USER. The binary reads no file,
+  # so any non-root uid works.
+  podSecurityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  # The exchanges the service declares and binds a spy queue to, per SDD section
+  # 8.1. The list matches capture.exchanges of examples/reference and the
+  # compose default, because nothing else in a Citadel environment declares an
+  # outbound exchange. A service that binds nothing fails the preflight of SDD
+  # section 4.10 at exit 3, so this value has no safe empty default.
+  exchanges:
+    - name: public.orchestration-engine.Manuscript.v1
+      declare: own
+    - name: public.orchestration-engine.Task.v1
+      declare: own
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+appDb:
+  image:
+    repository: postgres
+    tag: "15"
+    pullPolicy: IfNotPresent
+  # The image needs a password at first boot. These are placeholder values for
+  # an isolated environment. Override them with --set for a shared cluster.
+  auth:
+    username: citadel
+    password: citadel
+    database: citadel
+  # The image starts as root and steps down to postgres, so runAsNonRoot
+  # rejects it. The postgres account in the image is 999:999.
+  podSecurityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

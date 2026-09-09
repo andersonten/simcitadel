@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "ae-policy") }}
+  labels:
+    {{- include "citadel-stack.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "citadel-stack.labels" . | nindent 8 }}
+        {{- include "citadel-stack.selectorLabels" (dict "root" . "component" "ae-policy") | nindent 8 }}
+    spec:
+      {{- include "citadel-stack.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: OnFailure
+      securityContext:
+        {{- include "citadel-stack.podSecurityContext" .Values.aePolicy.podSecurityContext | nindent 8 }}
+      containers:
+        - name: apply-policy
+          image: "{{ .Values.aePolicy.image.repository }}:{{ .Values.aePolicy.image.tag }}"
+          imagePullPolicy: {{ .Values.aePolicy.image.pullPolicy }}
+          env:
+            # The Job reads the same Secret as the broker. A command line is
+            # visible in kubectl describe, so the credentials stay in the
+            # environment and curl reads them through a shell variable.
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq-auth") }}
+                  key: username
+            - name: RABBITMQ_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq-auth") }}
+                  key: password
+          resources:
+            {{- toYaml .Values.aePolicy.resources | nindent 12 }}
+          securityContext:
+            {{- include "citadel-stack.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: definitions
+              mountPath: /etc/citadel
+              readOnly: true
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              API="http://{{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq") }}:15672/api"
+              AUTH="$RABBITMQ_USER:$RABBITMQ_PASS"
+              # curl retries while the broker starts, so the Job needs no sleep.
+              curl -sf -u "$AUTH" --retry 30 --retry-all-errors --retry-delay 2 \
+                -X POST "$API/definitions" \
+                -H 'Content-Type: application/json' \
+                --data-binary @/etc/citadel/definitions.json
+              curl -sf -u "$AUTH" --retry 30 --retry-all-errors --retry-delay 2 \
+                -X PUT "$API/policies/%2F/citadel-alternate-exchange" \
+                -H 'Content-Type: application/json' \
+                -d '{"pattern":"^(public|private)\\.","apply-to":"exchanges","priority":0,"definition":{"alternate-exchange":"citadel.unroutable.ae"}}'
+              echo "rabbitmq topology and policy applied"
+      volumes:
+        # The policy points at citadel.unroutable.ae, so the Job imports the
+        # topology of SDD 7.3 before it applies the policy.
+        - name: definitions
+          configMap:
+            name: {{ include "citadel-stack.componentName" (dict "root" . "component" "rabbitmq-definitions") }}

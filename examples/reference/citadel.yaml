@@ -1,0 +1,48 @@
+version: 1
+environment:
+  name: local
+
+targets:
+  wiremock:
+    url: "${WIREMOCK_URL}"
+    adminUrl: "${WIREMOCK_ADMIN_URL}"
+  event-trigger:
+    url: "${EVENT_TRIGGER_URL}"
+  event-capture:
+    url: "${EVENT_CAPTURE_URL}"
+  rabbitmq:
+    amqpUrl: "${RABBITMQ_AMQP_URL}"
+    managementUrl: "${RABBITMQ_MANAGEMENT_URL}"
+  app:
+    url: "${APP_URL}"
+    graphqlPath: /graphql
+    readinessPath: /healthz
+  app-db:
+    driver: postgres
+    dsn: "${APP_DB_DSN}"
+    # The example app names its inbox columns as SDD section 8.4 defaults them.
+    # The block is here because inbox/assert needs it, and because doctor skips
+    # the inbox check for a target that carries none.
+    inbox:
+      table: inbox
+      messageIdColumn: message_id
+
+capture:
+  exchanges:
+    - name: public.orchestration-engine.Manuscript.v1
+      declare: own
+    - name: public.orchestration-engine.Task.v1
+      declare: own
+
+defaults:
+  awaitTimeout: 30s
+  awaitInterval: 500ms
+  quietPeriod: 2s
+  publishBudget: 100
+  appReadyTimeout: 30s
+  resetSettle: 2s
+
+paths:
+  scenarios: scenarios
+  payloads: payloads
+  wiremock: wiremock

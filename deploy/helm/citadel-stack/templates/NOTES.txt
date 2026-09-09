@@ -1,0 +1,15 @@
+Citadel stack deployed as release {{ .Release.Name }}.
+
+Components:
+  - WireMock
+  - RabbitMQ
+  - Event Trigger
+  - Event Capture
+  - Application Database (Postgres)
+
+Set the owner label in values.yaml to identify the team that owns this release.
+
+Run scenarios with:
+  citadel run --config citadel.yaml <scenario>
+
+Use "citadel doctor" to verify that all targets are reachable.
