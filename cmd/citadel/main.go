@@ -976,6 +976,13 @@ func waitForPort(ctx context.Context, addr string, timeout time.Duration) error 
 
 		select {
 		case <-waitCtx.Done():
+			// waitCtx ends when the caller's context ends as well as on the
+			// timeout, and the two need different messages. A cancelled run
+			// never waited the full window, and reporting that it did sends the
+			// reader to look for a service that is slow to start.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("wait for %s: %w", addr, ctxErr)
+			}
 			return fmt.Errorf("wait for %s: no connection within %s: %w", addr, timeout, err)
 		case <-time.After(interval):
 		}

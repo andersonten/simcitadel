@@ -111,29 +111,105 @@ func TestExecuteForward_LocalPortAccepts_AnnouncesTheMapping(t *testing.T) {
 		output:     "human",
 	}}
 
-	// The bound is a backstop against a hang. The accept below ends the command
-	// in the ordinary case, well inside it.
+	// The bound is a backstop against a hang. The announcement below ends the
+	// command in the ordinary case, well inside it.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// The readiness probe dials the listener, so an accepted connection is the
-	// condition that ends the wait. Ending the command on that connection keeps
-	// the test off a fixed sleep.
+	// The readiness probe dials the listener once. Accepting in a loop keeps the
+	// port answering for as long as the command runs.
 	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr == nil {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
 			_ = conn.Close()
 		}
-		cancel()
 	}()
 
+	// The command runs until the context ends, so the test ends it. The
+	// condition is the announcement itself, and never the accepted connection:
+	// a cancel at the moment the port answers races the probe that is dialling
+	// it, and the command then reports a cancelled context as an environment
+	// failure. Waiting for the announcement keeps the test off that race and off
+	// a fixed sleep.
+	out, announced := captureStdoutUntil(t, "forwarding citadel-wiremock")
+
 	var code int
-	out := captureStdout(t, func() { code = executeForward(ctx, o) })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		code = executeForward(ctx, o)
+	}()
+
+	select {
+	case <-announced:
+	case <-ctx.Done():
+	}
+	cancel()
+	<-done
+
+	printed := out()
 
 	if code != runner.ExitSuccess {
 		t.Errorf("exit = %d, want %d for a forward whose port answers", code, runner.ExitSuccess)
 	}
-	if !strings.Contains(out, "forwarding citadel-wiremock") {
-		t.Errorf("forward did not announce the mapping: %q", out)
+	if !strings.Contains(printed, "forwarding citadel-wiremock") {
+		t.Errorf("forward did not announce the mapping: %q", printed)
 	}
+}
+
+// captureStdoutUntil redirects stdout and closes the returned channel as soon
+// as stdout holds want. The returned function restores stdout and answers with
+// everything written. It exists because captureStdout cannot report progress:
+// it reads the pipe to the end, and a command that runs until its context ends
+// gives the test no other condition to wait for.
+func captureStdoutUntil(t *testing.T, want string) (func() string, <-chan struct{}) {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create pipe: %v", err)
+	}
+	original := os.Stdout
+	os.Stdout = w
+
+	seen := make(chan struct{})
+	collected := make(chan string, 1)
+
+	go func() {
+		var out strings.Builder
+		buf := make([]byte, 512)
+		found := false
+		for {
+			n, readErr := r.Read(buf)
+			if n > 0 {
+				out.Write(buf[:n])
+				if !found && strings.Contains(out.String(), want) {
+					found = true
+					close(seen)
+				}
+			}
+			if readErr != nil {
+				if !found {
+					close(seen)
+				}
+				collected <- out.String()
+				return
+			}
+		}
+	}()
+
+	return func() string {
+		os.Stdout = original
+		if closeErr := w.Close(); closeErr != nil {
+			t.Fatalf("close pipe writer: %v", closeErr)
+		}
+		out := <-collected
+		if closeErr := r.Close(); closeErr != nil {
+			t.Fatalf("close pipe reader: %v", closeErr)
+		}
+		return out
+	}, seen
 }
